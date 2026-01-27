@@ -7,3 +7,9 @@ audio/*.mp3
 node_modules/
 .npm
 .env
+
+# JetBrain IDEs
+.idea
+# Local & temporary files
+/local
+/temp
