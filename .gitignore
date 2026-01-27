@@ -8,3 +8,9 @@ node_modules/
 .npm
 .env
 bin
+
+# JetBrain IDEs
+.idea
+# Local & temporary files
+/local
+/temp
