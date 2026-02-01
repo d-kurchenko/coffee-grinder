@@ -24,6 +24,7 @@
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "elevenlabs": "^1.50.4",
+    "fast-levenshtein": "^3.0.0",
     "google-auth-library": "^9.15.1",
     "html-to-text": "^9.0.5",
     "jsdom": "^26.0.0",
