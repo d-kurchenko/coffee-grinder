@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url'
 
 import { log } from './log.js'
 import { sleep } from './sleep.js'
-import { isDomainInCooldown } from './domain-cooldown.js'
+import { isDomainInCooldown, setDomainCooldown } from './domain-cooldown.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -43,6 +43,7 @@ async function initialize() {
 	return { context, page }
 }
 let init = initialize()
+const captchaCooldownMs = 10 * 60e3
 
 function isBrowserClosedError(error) {
 	let message = String(error?.message || error || '').toLowerCase()
@@ -64,10 +65,40 @@ function toBrowseError(error) {
 		err.code = 'BROWSER_CLOSED'
 		return err
 	}
+	if (error?.code === 'CAPTCHA') return error
 	let message = String(error?.message || error || '')
 	let err = new Error(`Browse failed: ${message}`)
 	err.code = 'BROWSE_ERROR'
 	return err
+}
+
+async function detectCaptcha(page) {
+	let captchaFrame = await page.$('iframe[src*="recaptcha"], iframe[src*="hcaptcha"]')
+	if (captchaFrame) return true
+	let cfTurnstile = await page.$('input[name="cf-turnstile-response"], div.cf-turnstile')
+	if (cfTurnstile) return true
+	try {
+		let html = await page.content()
+		let lower = String(html || '').toLowerCase()
+		if (lower.includes('captcha') && (lower.includes('recaptcha') || lower.includes('hcaptcha') || lower.includes('turnstile'))) return true
+		if (lower.includes('verify you are human')) return true
+		if (lower.includes('are you a robot')) return true
+		if (lower.includes('press and hold')) return true
+		if (lower.includes('cloudflare')) return true
+	} catch {}
+	return false
+}
+
+async function detectArchiveNoResults(page) {
+	try {
+		let text = await page.textContent('body')
+		let lower = String(text || '').toLowerCase()
+		if (lower.includes('no results')) return true
+		if (lower.includes('no archive')) return true
+		if (lower.includes('nothing found')) return true
+		if (lower.includes('not in archive')) return true
+	} catch {}
+	return false
 }
 
 export async function browseArticle(url, { ignoreCooldown = false } = {}) {
@@ -83,10 +114,12 @@ export async function browseArticle(url, { ignoreCooldown = false } = {}) {
 			waitUntil: 'load',
 		})
 
-		let captcha = await page.$('iframe[src*="recaptcha"]')
 		let skipArchive = false
-		if (captcha) {
+		if (await detectCaptcha(page)) {
 			log('[warn] captcha detected on archive; skipping archive')
+			skipArchive = true
+		} else if (await detectArchiveNoResults(page)) {
+			log('[warn] archive has no results; skipping archive')
 			skipArchive = true
 		} else {
 			log('no captcha detected')
@@ -125,6 +158,13 @@ export async function browseArticle(url, { ignoreCooldown = false } = {}) {
 				}
 				log(e)
 			}
+			if (await detectCaptcha(page)) {
+				log('[warn] captcha detected on source; skipping source')
+				setDomainCooldown(url, captchaCooldownMs, 'captcha')
+				let err = new Error('captcha detected on source')
+				err.code = 'CAPTCHA'
+				throw err
+			}
 			try {
 				await page.waitForLoadState('networkidle', {
 					timeout: 10e3,
@@ -137,10 +177,12 @@ export async function browseArticle(url, { ignoreCooldown = false } = {}) {
 				}
 				log(e)
 			}
-			let sourceCaptcha = await page.$('iframe[src*="recaptcha"]')
-			if (sourceCaptcha) {
+			if (await detectCaptcha(page)) {
 				log('[warn] captcha detected on source; skipping source')
-				return ''
+				setDomainCooldown(url, captchaCooldownMs, 'captcha')
+				let err = new Error('captcha detected on source')
+				err.code = 'CAPTCHA'
+				throw err
 			}
 			html = await page.evaluate(() => {
 				return document.body.innerHTML

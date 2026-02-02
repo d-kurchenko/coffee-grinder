@@ -385,6 +385,15 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false } = {})
 			html = await browseArticle(url, { ignoreCooldown: !isFallback })
 		} catch (error) {
 			if (error?.code === 'BROWSER_CLOSED') throw error
+			if (error?.code === 'CAPTCHA') {
+				logEvent(event, {
+					phase: 'browse',
+					method: 'browse',
+					status: 'captcha',
+					attempt,
+				}, `#${event.id} browse captcha`, 'warn')
+				return { ok: false, captcha: true }
+			}
 			browseFailed = true
 			logEvent(event, {
 				phase: 'browse',
