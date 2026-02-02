@@ -14,5 +14,5 @@ export const verifyTemperature = 0
 export const verifyUseSearch = true
 export const agencySearchMax = 8
 export const agencySearchQueryMax = 2
-export const minAgencyLevel = AgencyLevel.Unknown
-export const fallbackMinAgencyLevel = AgencyLevel.Unknown
+export const minAgencyLevel = AgencyLevel.Niche
+export const fallbackMinAgencyLevel = AgencyLevel.Niche

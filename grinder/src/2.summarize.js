@@ -584,19 +584,6 @@ export async function summarize() {
 						}
 						let shouldExpand = shouldExpandAlternatives(e, alternatives)
 						let externalResults = []
-						if (shouldExpand && !e._agencyExpanded) {
-							let results = await searchAgencyArticles(e, last)
-							let added = mergeArticles(e, results)
-							e._agencyExpanded = true
-							logEvent(e, {
-								phase: 'agency_search',
-								status: added ? 'ok' : 'empty',
-								added,
-								total: getArticles(e).length,
-							}, `#${e.id} agency search ${added ? `added ${added}` : 'no results'}`, added ? 'info' : 'warn')
-							alternatives = getAlternativeArticles(e)
-							shouldExpand = shouldExpandAlternatives(e, alternatives)
-						}
 						if (shouldExpand && !e._gnExpanded) {
 							let queries = buildFallbackSearchQueries(e)
 							if (queries.length) {
@@ -628,6 +615,19 @@ export async function summarize() {
 								alternatives = getAlternativeArticles(e)
 								shouldExpand = shouldExpandAlternatives(e, alternatives)
 							}
+						}
+						if (shouldExpand && !e._agencyExpanded) {
+							let results = await searchAgencyArticles(e, last)
+							let added = mergeArticles(e, results)
+							e._agencyExpanded = true
+							logEvent(e, {
+								phase: 'agency_search',
+								status: added ? 'ok' : 'empty',
+								added,
+								total: getArticles(e).length,
+							}, `#${e.id} agency search ${added ? `added ${added}` : 'no results'}`, added ? 'info' : 'warn')
+							alternatives = getAlternativeArticles(e)
+							shouldExpand = shouldExpandAlternatives(e, alternatives)
 						}
 						let shouldExternal = shouldExternalSearch(alternatives)
 						if (shouldExternal && externalSearch?.enabled && !externalSearch.apiKey && !externalSearchWarned) {
