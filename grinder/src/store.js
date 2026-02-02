@@ -42,6 +42,18 @@ function formatSaveError(error) {
 	return parts.join(' | ')
 }
 
+function formatSaveErrorInline(error) {
+	if (!error) return ''
+	let status = error?.response?.status || error?.status || error?.code
+	let reason = error?.errors?.[0]?.reason
+	let message = error?.errors?.[0]?.message || error?.message || ''
+	let parts = []
+	if (status) parts.push(`status=${status}`)
+	if (reason) parts.push(`reason=${reason}`)
+	if (message) parts.push(`msg=${message}`)
+	return parts.join(' ')
+}
+
 function queueSave(reason = '') {
 	pendingSave = true
 	if (autoSavePaused) return
@@ -101,6 +113,7 @@ export async function saveRowByIndex(rowNumber, row) {
 	try {
 		await saveRow(spreadsheetId, newsSheet, news.headers || [], rowNumber, row)
 	} catch (e) {
-		log('Failed to save row', formatSaveError(e))
+		let detail = formatSaveErrorInline(e)
+		log(`[warn] sheet write failed (sheet=${spreadsheetId} tab=${newsSheet} row=${rowNumber}${detail ? ` ${detail}` : ''})`)
 	}
 }
