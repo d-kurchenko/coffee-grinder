@@ -2,7 +2,13 @@ import { JSDOM } from 'jsdom'
 
 import { log } from './log.js'
 
+let gnCooldownUntil = 0
+
 export async function decodeGoogleNewsUrl(url) {
+	if (Date.now() < gnCooldownUntil) {
+		log('google news decode cooldown active', Math.ceil((gnCooldownUntil - Date.now()) / 1000), 's')
+		return
+	}
 	for (let i = 0; i < 5; i++) {
 		try {
 			let parsedUrl = new URL(url)
@@ -10,7 +16,10 @@ export async function decodeGoogleNewsUrl(url) {
 			let response = await fetch(`https://news.google.com/articles/${id}`)
 			if (!response.ok) {
 				log(`Fetch failed: ${response.status} ${response.statusText}`)
-				if (response.status === 429) return
+				if (response.status === 429) {
+					gnCooldownUntil = Date.now() + 10 * 60e3
+					return
+				}
 			}
 			let html = await response.text()
 			let dom = new JSDOM(html)

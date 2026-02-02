@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url'
 
 import { log } from './log.js'
 import { sleep } from './sleep.js'
+import { isDomainInCooldown } from './domain-cooldown.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -43,14 +44,40 @@ async function initialize() {
 }
 let init = initialize()
 
+function isBrowserClosedError(error) {
+	let message = String(error?.message || error || '').toLowerCase()
+	return message.includes('target page') && message.includes('has been closed')
+		|| message.includes('context or browser has been closed')
+		|| message.includes('browser has been closed')
+		|| message.includes('target closed')
+		|| error?.name === 'TargetClosedError'
+}
+
 export async function finalyze() {
 	let { context } = await init
 	context?.close()
 }
 
+function toBrowseError(error) {
+	if (isBrowserClosedError(error)) {
+		let err = new Error('Playwright browser window is closed')
+		err.code = 'BROWSER_CLOSED'
+		return err
+	}
+	let message = String(error?.message || error || '')
+	let err = new Error(`Browse failed: ${message}`)
+	err.code = 'BROWSE_ERROR'
+	return err
+}
+
 export async function browseArticle(url) {
 	let { page } = await init
 	try {
+		if (page?.isClosed?.()) {
+			let err = new Error('Playwright browser window is closed')
+			err.code = 'BROWSER_CLOSED'
+			throw err
+		}
 		log('Browsing archive...')
 		await page.goto(`https://archive.ph/${url.split('?')[0]}`, {
 			waitUntil: 'load',
@@ -78,12 +105,22 @@ export async function browseArticle(url) {
 
 		if (!html) {
 			log('browsing source...')
+			let cooldown = isDomainInCooldown(url)
+			if (cooldown) {
+				log('domain cooldown active', cooldown.host, Math.ceil(cooldown.remainingMs / 1000), 's')
+				return ''
+			}
 			try {
 				await page.goto(url, {
 					waitUntil: 'load',
 					timeout: 10e3,
 				})
 			} catch (e) {
+				if (isBrowserClosedError(e)) {
+					let err = new Error('Playwright browser window is closed')
+					err.code = 'BROWSER_CLOSED'
+					throw err
+				}
 				log(e)
 			}
 			try {
@@ -91,6 +128,11 @@ export async function browseArticle(url) {
 					timeout: 10e3,
 				})
 			} catch (e) {
+				if (isBrowserClosedError(e)) {
+					let err = new Error('Playwright browser window is closed')
+					err.code = 'BROWSER_CLOSED'
+					throw err
+				}
 				log(e)
 			}
 			html = await page.evaluate(() => {
@@ -100,6 +142,6 @@ export async function browseArticle(url) {
 		return html
 	}
 	catch (e) {
-		log('article browsing failed\n', e)
+		throw toBrowseError(e)
 	}
 }
