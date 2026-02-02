@@ -70,7 +70,7 @@ function toBrowseError(error) {
 	return err
 }
 
-export async function browseArticle(url) {
+export async function browseArticle(url, { ignoreCooldown = false } = {}) {
 	let { page } = await init
 	try {
 		if (page?.isClosed?.()) {
@@ -106,7 +106,7 @@ export async function browseArticle(url) {
 		if (!html) {
 			log('browsing source...')
 			let cooldown = isDomainInCooldown(url)
-			if (cooldown) {
+			if (cooldown && !ignoreCooldown) {
 				log('domain cooldown active', cooldown.host, Math.ceil(cooldown.remainingMs / 1000), 's')
 				return ''
 			}

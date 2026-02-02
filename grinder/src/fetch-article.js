@@ -12,6 +12,7 @@ const archiveDelayMs = fetchConfig.archiveDelayMs
 const archiveCooldownMs = fetchConfig.archiveCooldownMs
 let archiveCooldownUntil = 0
 let lastArchiveAttempt = 0
+const lastFetchStatus = new Map()
 const cooldownMsByStatus = {
 	401: 10 * 60e3,
 	403: 10 * 60e3,
@@ -48,6 +49,25 @@ function buildJinaUrl(url) {
 	let parsed = new URL(url)
 	let protocol = parsed.protocol.replace(':', '')
 	return `https://r.jina.ai/${protocol}://${parsed.host}${parsed.pathname}${parsed.search}`
+}
+
+function getHost(url) {
+	try {
+		return new URL(url).hostname.replace(/^www\./, '')
+	} catch {
+		return ''
+	}
+}
+
+function setLastStatus(url, status) {
+	let host = getHost(url)
+	if (host) lastFetchStatus.set(host, status)
+}
+
+export function getLastFetchStatus(url) {
+	let host = getHost(url)
+	if (!host) return null
+	return lastFetchStatus.get(host)
 }
 
 function sleep(ms) {
@@ -156,13 +176,20 @@ export async function fetchArticle(url) {
 				headers: defaultHeaders,
 			})
 			if (response.ok) {
+				setLastStatus(url, 200)
 				return await response.text()
 			}
+			setLastStatus(url, response.status)
 
 			let retryAfter = getRetryAfterMs(response)
 			let baseCooldown = cooldownMsByStatus[response.status] || 0
 			let cooldownMs = retryAfter || baseCooldown
 			if (cooldownMs) setDomainCooldown(url, cooldownMs, response.status)
+
+			if (response.status === 429) {
+				log('article fetch failed', response.status, response.statusText)
+				return
+			}
 
 			if ([401, 403, 429].includes(response.status)) {
 				let altText = await tryFetch(buildJinaUrl(url), 'jina')
@@ -176,6 +203,7 @@ export async function fetchArticle(url) {
 			log('article fetch failed', response.status, response.statusText)
 		} catch(e) {
 			log('article fetch failed', e)
+			setLastStatus(url, 'error')
 			setDomainCooldown(url, 2 * 60e3, 'error')
 		}
 	}

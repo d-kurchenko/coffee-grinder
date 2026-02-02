@@ -4,8 +4,8 @@ import { log } from './log.js'
 import { sleep } from './sleep.js'
 import { news, pauseAutoSave, resumeAutoSave, saveRowByIndex, spreadsheetId } from './store.js'
 import { topics, topicsMap } from '../config/topics.js'
-import { decodeGoogleNewsUrl } from './google-news.js'
-import { fetchArticle } from './fetch-article.js'
+import { decodeGoogleNewsUrl, getGoogleNewsDecodeCooldownMs } from './google-news.js'
+import { fetchArticle, getLastFetchStatus } from './fetch-article.js'
 import { htmlToText } from './html-to-text.js'
 import { ai } from './ai.js'
 import { browseArticle, finalyze } from './browse-article.js'
@@ -170,6 +170,13 @@ function truncate(text, max = 220) {
 }
 
 async function decodeUrl(gnUrl, last) {
+	if (gnUrl && isGoogleNewsUrl(gnUrl)) {
+		let cooldownMs = getGoogleNewsDecodeCooldownMs()
+		if (cooldownMs > 0) {
+			log('google news decode cooldown active', Math.ceil(cooldownMs / 1000), 's')
+			return ''
+		}
+	}
 	await sleep(last.urlDecode.time + last.urlDecode.delay - Date.now())
 	let maxDelay = Number.isFinite(last.urlDecode.maxDelay)
 		? last.urlDecode.maxDelay
@@ -330,7 +337,18 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false } = {})
 		let mismatchHtml = null
 		let mismatchText = null
 		let html = await fetchArticle(url)
+		let lastStatus = getLastFetchStatus(url)
 		let text = extractText(html)
+		if (!text && lastStatus === 429) {
+			logEvent(event, {
+				phase: 'fetch',
+				method: 'fetch',
+				status: 'rate_limited',
+				attempt,
+				httpStatus: 429,
+			}, `#${event.id} fetch rate-limited (429)`, 'warn')
+			return { ok: false, rateLimited: true }
+		}
 		if (text) {
 			foundText = true
 			logEvent(event, {
@@ -364,7 +382,7 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false } = {})
 
 		let browseFailed = false
 		try {
-			html = await browseArticle(url)
+			html = await browseArticle(url, { ignoreCooldown: !isFallback })
 		} catch (error) {
 			if (error?.code === 'BROWSER_CLOSED') throw error
 			browseFailed = true
@@ -701,12 +719,26 @@ export async function summarize() {
 								}, `#${e.id} fallback pool: ${pool.map(a => `${a.source}(${a.level})`).join(', ')}`, 'info')
 							}
 						}
-						for (let j = 0; j < alternatives.length; j++) {
-							let alt = alternatives[j]
+						let pendingDecode = []
+						const tryAlternative = async (alt, { allowWait }) => {
 							log('Trying alternative source', alt.source, `(level ${alt.level})...`)
 							let altUrl = normalizeUrl(alt.url)
 							let decodeMethod = altUrl ? 'direct' : 'gn'
 							if (!altUrl && alt.gnUrl) {
+								if (!allowWait) {
+									let waitMs = (last.urlDecode.time + last.urlDecode.delay) - Date.now()
+									if (waitMs > 0) {
+										logEvent(e, {
+											phase: 'fallback_decode',
+											status: 'deferred',
+											candidateSource: alt.source,
+											level: alt.level,
+											method: decodeMethod,
+											waitMs,
+										}, `#${e.id} fallback decode deferred (${alt.source})`, 'info')
+										return { deferred: true }
+									}
+								}
 								altUrl = await decodeUrl(alt.gnUrl, last)
 							}
 							if (!altUrl) {
@@ -717,7 +749,7 @@ export async function summarize() {
 									level: alt.level,
 									method: decodeMethod,
 								}, `#${e.id} fallback decode failed (${alt.source})`, 'warn')
-								continue
+								return { fetched: false }
 							}
 							logEvent(e, {
 								phase: 'fallback_decode',
@@ -753,7 +785,7 @@ export async function summarize() {
 									candidateSource: alt.source,
 									level: alt.level,
 								}, `#${e.id} fallback selected ${alt.source}`, 'ok')
-								break
+								return { fetched: true }
 							} else if (result?.mismatch) {
 								logEvent(e, {
 									phase: 'fallback_verify_mismatch',
@@ -763,6 +795,23 @@ export async function summarize() {
 									pageSummary: result?.verify?.pageSummary,
 									reason: result?.verify?.reason,
 								}, `#${e.id} fallback text mismatch (${alt.source})`, 'warn')
+							}
+							return { fetched: false }
+						}
+
+						for (let j = 0; j < alternatives.length; j++) {
+							let alt = alternatives[j]
+							let res = await tryAlternative(alt, { allowWait: false })
+							if (res?.deferred) {
+								pendingDecode.push(alt)
+								continue
+							}
+							if (res?.fetched) break
+						}
+						if (!fetched && pendingDecode.length) {
+							for (let alt of pendingDecode) {
+								let res = await tryAlternative(alt, { allowWait: true })
+								if (res?.fetched) break
 							}
 						}
 						if (fetched) break
