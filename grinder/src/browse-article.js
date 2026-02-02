@@ -54,6 +54,11 @@ function isBrowserClosedError(error) {
 		|| error?.name === 'TargetClosedError'
 }
 
+function isTimeoutError(error) {
+	let message = String(error?.message || error || '').toLowerCase()
+	return error?.name === 'TimeoutError' || message.includes('timeout')
+}
+
 export async function finalyze() {
 	let { context } = await init
 	context?.close()
@@ -66,6 +71,7 @@ function toBrowseError(error) {
 		return err
 	}
 	if (error?.code === 'CAPTCHA') return error
+	if (error?.code === 'TIMEOUT') return error
 	let message = String(error?.message || error || '')
 	let err = new Error(`Browse failed: ${message}`)
 	err.code = 'BROWSE_ERROR'
@@ -156,6 +162,13 @@ export async function browseArticle(url, { ignoreCooldown = false } = {}) {
 					err.code = 'BROWSER_CLOSED'
 					throw err
 				}
+				if (isTimeoutError(e)) {
+					log('browse timeout', new URL(url).hostname.replace(/^www\./, ''), '10s')
+					setDomainCooldown(url, 2 * 60e3, 'timeout')
+					let err = new Error('browse timeout')
+					err.code = 'TIMEOUT'
+					throw err
+				}
 				log(e)
 			}
 			if (await detectCaptcha(page)) {
@@ -173,6 +186,13 @@ export async function browseArticle(url, { ignoreCooldown = false } = {}) {
 				if (isBrowserClosedError(e)) {
 					let err = new Error('Playwright browser window is closed')
 					err.code = 'BROWSER_CLOSED'
+					throw err
+				}
+				if (isTimeoutError(e)) {
+					log('browse timeout', new URL(url).hostname.replace(/^www\./, ''), '10s')
+					setDomainCooldown(url, 2 * 60e3, 'timeout')
+					let err = new Error('browse timeout')
+					err.code = 'TIMEOUT'
 					throw err
 				}
 				log(e)

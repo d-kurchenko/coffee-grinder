@@ -51,6 +51,7 @@ import {
 } from './summarize/utils.js'
 
 const minTextLength = 400
+const maxHtmlToTextChars = 4_000_000
 const fetchAttempts = 2
 const verifyStatusColumn = 'verifyStatus'
 const articlesColumn = 'articles'
@@ -241,13 +242,35 @@ function extractDomText(document) {
 	for (let selector of selectors) {
 		let nodes = [...document.querySelectorAll(selector)]
 		for (let node of nodes) {
-			let text = htmlToText(node.innerHTML || '')?.trim()
+			let text = safeHtmlToText(node.innerHTML || '')
 			if (text && text.length > best.length) {
 				best = text
 			}
 		}
 	}
 	if (best.length > minTextLength) return best
+}
+
+function stripHtmlFast(html, limit = maxHtmlToTextChars) {
+	let input = html || ''
+	if (limit && input.length > limit) input = input.slice(0, limit)
+	let text = input.replace(/<[^>]+>/g, ' ')
+	text = text.replace(/\s+/g, ' ').trim()
+	return text
+}
+
+function safeHtmlToText(html) {
+	if (!html) return ''
+	if (html.length > maxHtmlToTextChars) {
+		log('html too large for html-to-text', html.length, 'chars')
+		return stripHtmlFast(html)
+	}
+	try {
+		return htmlToText(html)?.trim() || ''
+	} catch (error) {
+		log('html-to-text failed', error?.message || error)
+		return stripHtmlFast(html)
+	}
 }
 
 function extractText(html) {
@@ -265,7 +288,7 @@ function extractText(html) {
 		let domText = extractDomText(doc)
 		if (domText) return domText
 	} catch {}
-	let text = htmlToText(cleaned)?.trim()
+	let text = safeHtmlToText(cleaned)
 	if (!text || text.length <= minTextLength) return
 	return text
 }
@@ -332,11 +355,56 @@ async function verifyText({ event, url, text, isFallback, method, attempt, last 
 
 async function fetchTextWithRetry(event, url, last, { isFallback = false } = {}) {
 	let foundText = false
+	const browseHedgeDelayMs = 1500
 	for (let attempt = 1; attempt <= fetchAttempts; attempt++) {
 		let mismatchResult = null
 		let mismatchHtml = null
 		let mismatchText = null
+		let browsePromise = null
+		let browseStarted = false
+		let startBrowse = async () => {
+			browseStarted = true
+			let html = ''
+			let browseFailed = false
+			try {
+				html = await browseArticle(url, { ignoreCooldown: !isFallback })
+			} catch (error) {
+				if (error?.code === 'BROWSER_CLOSED') throw error
+				if (error?.code === 'CAPTCHA') {
+					logEvent(event, {
+						phase: 'browse',
+						method: 'browse',
+						status: 'captcha',
+						attempt,
+					}, `#${event.id} browse captcha`, 'warn')
+					return { html: '', browseFailed: false, aborted: true }
+				}
+				if (error?.code === 'TIMEOUT') {
+					logEvent(event, {
+						phase: 'browse',
+						method: 'browse',
+						status: 'timeout',
+						attempt,
+					}, `#${event.id} browse timeout`, 'warn')
+					return { html: '', browseFailed: true, aborted: true }
+				}
+				browseFailed = true
+				logEvent(event, {
+					phase: 'browse',
+					method: 'browse',
+					status: 'error',
+					error: error?.message || String(error),
+					errorCode: error?.code || '',
+				}, `#${event.id} browse failed`, 'warn')
+				html = ''
+			}
+			return { html, browseFailed }
+		}
+		let browseTimer = setTimeout(() => {
+			if (!browseStarted) browsePromise = startBrowse()
+		}, browseHedgeDelayMs)
 		let html = await fetchArticle(url)
+		clearTimeout(browseTimer)
 		let lastStatus = getLastFetchStatus(url)
 		let text = extractText(html)
 		if (!text && lastStatus === 429) {
@@ -380,30 +448,10 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false } = {})
 			return { ok: false, mismatch: true, verify: mismatchResult, html: mismatchHtml, text: mismatchText }
 		}
 
-		let browseFailed = false
-		try {
-			html = await browseArticle(url, { ignoreCooldown: !isFallback })
-		} catch (error) {
-			if (error?.code === 'BROWSER_CLOSED') throw error
-			if (error?.code === 'CAPTCHA') {
-				logEvent(event, {
-					phase: 'browse',
-					method: 'browse',
-					status: 'captcha',
-					attempt,
-				}, `#${event.id} browse captcha`, 'warn')
-				return { ok: false, captcha: true }
-			}
-			browseFailed = true
-			logEvent(event, {
-				phase: 'browse',
-				method: 'browse',
-				status: 'error',
-				error: error?.message || String(error),
-				errorCode: error?.code || '',
-			}, `#${event.id} browse failed`, 'warn')
-			html = ''
-		}
+		if (!browsePromise) browsePromise = startBrowse()
+		let browseResult = await browsePromise
+		html = browseResult?.html || ''
+		let browseFailed = Boolean(browseResult?.browseFailed)
 		text = extractText(html)
 		if (text) {
 			foundText = true
