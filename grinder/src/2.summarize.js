@@ -886,7 +886,16 @@ export async function summarize() {
 				await sleep(last.ai.time + last.ai.delay - Date.now())
 				last.ai.time = Date.now()
 				log('Summarizing', e.text.length, 'chars...')
+				let summarizeStart = Date.now()
 				let res = await ai(e)
+				let summarizeMs = Date.now() - summarizeStart
+				logEvent(e, {
+					phase: 'summarize',
+					status: res ? 'ok' : 'empty',
+					durationMs: summarizeMs,
+					inputChars: e.text?.length || 0,
+					outputChars: res?.summary?.length || 0,
+				}, `#${e.id} summarize ${summarizeMs}ms`, res ? 'info' : 'warn')
 				if (res) {
 					last.ai.delay = res.delay
 					e.topic ||= topicsMap[res.topic]
