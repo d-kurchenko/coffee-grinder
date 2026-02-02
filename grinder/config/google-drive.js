@@ -1,6 +1,10 @@
 export let rootFolderId = '1nJnHBcY252xqV0JDIidsxxhJkY6-w2WO'
-export let mainSpreadsheetId = '1CSn9AI0CUCNPXXGpHO1jafaTsGp4i0K91qIsSHQ1mkk'
-export let autoSpreadsheetId = '1aTs8t6wp3Ag7yryH2wci_ETdtNWmDu0ePyf-jLdY9NQ' // table with manually added news
+export let mainSpreadsheetId =
+	process.env.GOOGLE_SHEET_ID_MAIN ||
+	'1q7UmHBzY92JVan2dkeMqxHSvWSMYjUJ1gD0CxisPOdI'
+export let autoSpreadsheetId =
+	process.env.GOOGLE_SHEET_ID_AUTO ||
+	'1aTs8t6wp3Ag7yryH2wci_ETdtNWmDu0ePyf-jLdY9NQ' // table with manually added news
 export const coffeeTodayFolderId = '1P1m2QdN_Kefr_k2Kz4foYa0EmmQ0Acw_' // folder to put all files
 export let newsSheet = 'news'
 export let aiSheet = 'ai-instructions'
