@@ -59,7 +59,10 @@ async function transcribeAndValidate(filePath, originalText) {
 	}, { retries: 2, delay: 3000, label: 'Transcription API' })
 
 	const transcription = transcriptionResponse.choices[0].message.content
-	log('Transcription received:', transcription.substring(0, 100) + '...')
+	const transcriptionPreview = transcription.length > 100
+		? transcription.substring(0, 100) + '...'
+		: transcription
+	log('Transcription received:', transcriptionPreview)
 
 	const normalizedOriginal = normalizeText(originalText)
 	const normalizedTranscription = normalizeText(transcription)
