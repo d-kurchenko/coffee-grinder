@@ -61,6 +61,29 @@ function getCandidateTitleKey(item) {
 	return titleKey || slugKey || ''
 }
 
+function normalizeDomain(link) {
+	if (!link) return ''
+	try {
+		return new URL(link).hostname.replace(/^www\./, '').toLowerCase()
+	} catch {
+		return ''
+	}
+}
+
+function getCandidateDomain(item) {
+	let link = getArticleLink(item) || item?.url || item?.gnUrl || ''
+	let domain = normalizeDomain(link)
+	if (domain && domain !== 'news.google.com') return domain
+	return normalizeSource(item?.source || '') || domain
+}
+
+function getEventDomain(event) {
+	let link = getArticleLink(event) || event?.url || event?.gnUrl || ''
+	let domain = normalizeDomain(link)
+	if (domain && domain !== 'news.google.com') return domain
+	return normalizeSource(event?.source || '') || domain
+}
+
 export function parseArticlesValue(value) {
 	if (!value) return []
 	if (Array.isArray(value)) return value
@@ -87,7 +110,9 @@ export function getArticles(event) {
 function buildAlternativeArticles(event, candidates) {
 	let currentSource = normalizeSource(event.source)
 	let currentLink = getArticleLink(event)
-	let seen = new Set([currentSource])
+	let currentDomain = getEventDomain(event)
+	let seen = new Set(currentSource ? [currentSource] : [])
+	let seenDomains = new Set(currentDomain ? [currentDomain] : [])
 	let seenTitle = new Set()
 	let targetDate = getEventDate(event)
 	let items = (candidates || [])
@@ -100,6 +125,7 @@ function buildAlternativeArticles(event, candidates) {
 			normalizedSource: normalizeSource(article.source),
 			hasDirectUrl: Boolean(article?.url),
 			normalizedTitle: getCandidateTitleKey(article),
+			domain: getCandidateDomain(article),
 			origin: article?.origin || article?.provider || article?.from || (article?.gnUrl ? 'gn' : ''),
 			parsedDate: parseDate(article?.date),
 			rank: Number.isFinite(Number(article?.rank))
@@ -107,31 +133,33 @@ function buildAlternativeArticles(event, candidates) {
 				: (Number.isFinite(Number(article?.position)) ? Number(article.position) : null),
 		}))
 	let filtered = []
-	for (let article of items) {
+	let sorted = items
+		.filter(article => article.normalizedSource)
+		.filter(article => isWithinDateWindow(targetDate, article.parsedDate))
+		.filter(article => !(Number.isFinite(minAgencyLevel) && article.level < minAgencyLevel))
+		.sort((a, b) => {
+			let levelDiff = (b.level - a.level)
+			if (levelDiff) return levelDiff
+			let directDiff = (b.hasDirectUrl ? 1 : 0) - (a.hasDirectUrl ? 1 : 0)
+			if (directDiff) return directDiff
+			let rankA = Number.isFinite(Number(a.rank)) ? Number(a.rank) : Number.POSITIVE_INFINITY
+			let rankB = Number.isFinite(Number(b.rank)) ? Number(b.rank) : Number.POSITIVE_INFINITY
+			return rankA - rankB
+		})
+	for (let article of sorted) {
 		if (!article.normalizedSource) continue
-		if (!isWithinDateWindow(targetDate, article.parsedDate)) continue
-		if (Number.isFinite(minAgencyLevel) && article.level < minAgencyLevel) continue
-		if (seen.has(article.normalizedSource)) {
-			let link = getArticleLink(article)
-			if (!currentLink || !link || link === currentLink) continue
-		}
+		if (seen.has(article.normalizedSource)) continue
+		if (article.domain && seenDomains.has(article.domain)) continue
 		let titleKey = article.normalizedTitle
 			? `${article.normalizedSource}|${article.normalizedTitle}`
 			: `${article.normalizedSource}|__no_title__`
 		if (seenTitle.has(titleKey)) continue
 		seenTitle.add(titleKey)
 		seen.add(article.normalizedSource)
+		if (article.domain) seenDomains.add(article.domain)
 		filtered.push(article)
 	}
-	return filtered.sort((a, b) => {
-		let levelDiff = (b.level - a.level)
-		if (levelDiff) return levelDiff
-		let directDiff = (b.hasDirectUrl ? 1 : 0) - (a.hasDirectUrl ? 1 : 0)
-		if (directDiff) return directDiff
-		let rankA = Number.isFinite(Number(a.rank)) ? Number(a.rank) : Number.POSITIVE_INFINITY
-		let rankB = Number.isFinite(Number(b.rank)) ? Number(b.rank) : Number.POSITIVE_INFINITY
-		return rankA - rankB
-	})
+	return filtered
 }
 
 export function getAlternativeArticles(event) {
@@ -147,6 +175,8 @@ export function classifyAlternativeCandidates(event, candidates) {
 		let sourceKey = normalizeSource(item.source)
 		return `${sourceKey}|${link}`
 	}))
+	let acceptedDomains = new Set(accepted.map(item => item.domain).filter(Boolean))
+	let currentDomain = getEventDomain(event)
 	let currentSource = normalizeSource(event.source)
 	let currentLink = getArticleLink(event)
 	let targetDate = getEventDate(event)
@@ -154,6 +184,7 @@ export function classifyAlternativeCandidates(event, candidates) {
 	for (let article of items) {
 		let link = getArticleLink(article)
 		let sourceKey = normalizeSource(article.source)
+		let domain = getCandidateDomain(article)
 		let key = `${sourceKey}|${link}`
 		let reason = ''
 		let candidateDate = parseDate(article?.date)
@@ -166,6 +197,10 @@ export function classifyAlternativeCandidates(event, candidates) {
 			reason = 'date_out_of_range'
 		} else if (sourceKey && sourceKey === currentSource && link === currentLink) {
 			reason = 'same_source_same_link'
+		} else if (currentDomain && domain && domain === currentDomain) {
+			reason = 'same_domain_current'
+		} else if (acceptedDomains.has(domain)) {
+			reason = 'same_domain'
 		} else if (acceptedKeys.has(key)) {
 			continue
 		} else if (Number.isFinite(minAgencyLevel) && level < minAgencyLevel) {
@@ -193,7 +228,9 @@ export function buildExternalAlternatives(event, results) {
 	if (!Array.isArray(results) || !results.length) return []
 	let currentSource = normalizeSource(event.source)
 	let currentLink = getArticleLink(event)
-	let seen = new Set([currentSource])
+	let currentDomain = getEventDomain(event)
+	let seen = new Set(currentSource ? [currentSource] : [])
+	let seenDomains = new Set(currentDomain ? [currentDomain] : [])
 	let seenTitle = new Set()
 	let targetDate = getEventDate(event)
 	let items = results
@@ -206,6 +243,7 @@ export function buildExternalAlternatives(event, results) {
 			normalizedSource: normalizeSource(item.source),
 			hasDirectUrl: Boolean(item?.url),
 			normalizedTitle: getCandidateTitleKey(item),
+			domain: getCandidateDomain(item),
 			origin: item?.origin || item?.provider || item?.from || '',
 			parsedDate: parseDate(item?.date),
 			rank: Number.isFinite(Number(item?.rank))
@@ -213,31 +251,33 @@ export function buildExternalAlternatives(event, results) {
 				: (Number.isFinite(Number(item?.position)) ? Number(item.position) : null),
 		}))
 	let filtered = []
-	for (let item of items) {
+	let sorted = items
+		.filter(item => item.normalizedSource)
+		.filter(item => isWithinDateWindow(targetDate, item.parsedDate))
+		.filter(item => !(Number.isFinite(minAgencyLevel) && item.level < minAgencyLevel))
+		.sort((a, b) => {
+			let levelDiff = (b.level - a.level)
+			if (levelDiff) return levelDiff
+			let directDiff = (b.hasDirectUrl ? 1 : 0) - (a.hasDirectUrl ? 1 : 0)
+			if (directDiff) return directDiff
+			let rankA = Number.isFinite(Number(a.rank)) ? Number(a.rank) : Number.POSITIVE_INFINITY
+			let rankB = Number.isFinite(Number(b.rank)) ? Number(b.rank) : Number.POSITIVE_INFINITY
+			return rankA - rankB
+		})
+	for (let item of sorted) {
 		if (!item.normalizedSource) continue
-		if (!isWithinDateWindow(targetDate, item.parsedDate)) continue
-		if (Number.isFinite(minAgencyLevel) && item.level < minAgencyLevel) continue
-		if (seen.has(item.normalizedSource)) {
-			let link = getArticleLink(item)
-			if (!currentLink || !link || link === currentLink) continue
-		}
+		if (seen.has(item.normalizedSource)) continue
+		if (item.domain && seenDomains.has(item.domain)) continue
 		let titleKey = item.normalizedTitle
 			? `${item.normalizedSource}|${item.normalizedTitle}`
 			: `${item.normalizedSource}|__no_title__`
 		if (seenTitle.has(titleKey)) continue
 		seenTitle.add(titleKey)
 		seen.add(item.normalizedSource)
+		if (item.domain) seenDomains.add(item.domain)
 		filtered.push(item)
 	}
-	return filtered.sort((a, b) => {
-		let levelDiff = (b.level - a.level)
-		if (levelDiff) return levelDiff
-		let directDiff = (b.hasDirectUrl ? 1 : 0) - (a.hasDirectUrl ? 1 : 0)
-		if (directDiff) return directDiff
-		let rankA = Number.isFinite(Number(a.rank)) ? Number(a.rank) : Number.POSITIVE_INFINITY
-		let rankB = Number.isFinite(Number(b.rank)) ? Number(b.rank) : Number.POSITIVE_INFINITY
-		return rankA - rankB
-	})
+	return filtered
 }
 
 export function shouldExpandAlternatives(event, alternatives) {

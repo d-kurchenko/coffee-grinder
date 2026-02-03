@@ -18,6 +18,7 @@ import { verifyArticle } from './verify-article.js'
 import { buildVerifyContext } from './verify-context.js'
 import { searchExternal, sourceFromUrl } from './external-search.js'
 import { copyFile } from './google-drive.js'
+import { classifyHtmlState } from './services/playwright.js'
 import { coffeeTodayFolderId, newsSheet } from '../config/google-drive.js'
 import {
 	verifyMode,
@@ -1174,6 +1175,11 @@ function extractJsonText(document) {
 	if (candidate && candidate.length > minTextLength) return candidate.trim()
 }
 
+function classifyPageState(html, meta = {}) {
+	let title = meta?.title || meta?.metaTitle || ''
+	return classifyHtmlState(html || '', title || '')
+}
+
 function extractDomText(document) {
 	const selectors = [
 		'[itemprop="articleBody"]',
@@ -1381,6 +1387,7 @@ async function verifyText({ event, url, text, isFallback, method, attempt, last,
 
 async function fetchTextWithRetry(event, url, last, { isFallback = false, origin = '' } = {}) {
 	let foundText = false
+	let lastPageState = null
 	const normalizeFetchStatus = value => {
 		if (value === null || value === undefined) return ''
 		if (typeof value === 'number') return value
@@ -1493,6 +1500,8 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false, origin
 		if (html) fetchMeta = extractMetaFromHtml(html)
 		let lastStatus = getLastFetchStatus(url)
 		let text = extractText(html)
+		let fetchState = classifyPageState(html, fetchMeta)
+		lastPageState = fetchState
 		let normalizedStatus = normalizeFetchStatus(lastStatus || lastFailureStatus)
 		if (!text && isNonRetryableStatus(normalizedStatus)) {
 			let statusLabel = normalizedStatus === 'captcha'
@@ -1575,6 +1584,8 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false, origin
 				method: 'fetch',
 				status: 'no_text',
 				attempt,
+				pageState: fetchState?.state || '',
+				pageStateReason: fetchState?.reason || '',
 			}, `#${event.id} fetch no text (${attempt}/${fetchAttempts})`, 'warn')
 		}
 
@@ -1590,6 +1601,8 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false, origin
 		if (!browseMeta || !Object.values(browseMeta).some(Boolean)) {
 			browseMeta = html ? extractMetaFromHtml(html) : {}
 		}
+		let browseState = classifyPageState(html, browseMeta)
+		lastPageState = browseState
 		let browseFailed = Boolean(browseResult?.browseFailed)
 		text = extractText(html)
 		if (!text && browseResult?.aborted && browseResult?.abortReason) {
@@ -1630,6 +1643,8 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false, origin
 				method: 'browse',
 				status: 'no_text',
 				attempt,
+				pageState: browseState?.state || '',
+				pageStateReason: browseState?.reason || '',
 			}, `#${event.id} browse no text (${attempt}/${fetchAttempts})`, 'warn')
 			progressTracker?.step(event, 'playwright', 'no_text')
 		}
@@ -1655,6 +1670,8 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false, origin
 			phase: 'fetch',
 			status: 'no_text',
 			attempts: fetchAttempts,
+			pageState: lastPageState?.state || '',
+			pageStateReason: lastPageState?.reason || '',
 		}, `#${event.id} no text after ${fetchAttempts} attempts`, 'warn')
 	}
 }
@@ -1847,24 +1864,25 @@ export async function summarize() {
 						}, `#${e.id} no fallback candidates`, 'warn')
 					}
 
-					let pendingDecode = []
+					let deferredCandidate = null
+					const logDeferredCandidates = process.env.LOG_DEFERRED === '1'
 					const tryAlternative = async (alt, { allowWait }) => {
-						log('Trying alternative source', alt.source, `(level ${alt.level})...`)
-						logCandidateDecision(e, alt, 'attempt', '', { phase: 'fallback_attempt' })
 						let altUrl = normalizeUrl(alt.url)
 						let decodeMethod = altUrl ? 'direct' : 'gn'
 						if (!altUrl && alt.gnUrl) {
 							if (!allowWait) {
 								let waitMs = (last.urlDecode.time + last.urlDecode.delay) - Date.now()
 								if (waitMs > 0) {
-									logEvent(e, {
-										phase: 'fallback_decode',
-										status: 'deferred',
-										candidateSource: alt.source,
-										level: alt.level,
-										method: decodeMethod,
-										waitMs,
-									}, `#${e.id} fallback decode deferred (${alt.source})`, 'info')
+									if (logDeferredCandidates) {
+										logEvent(e, {
+											phase: 'fallback_decode',
+											status: 'deferred',
+											candidateSource: alt.source,
+											level: alt.level,
+											method: decodeMethod,
+											waitMs,
+										}, `#${e.id} fallback decode deferred (${alt.source})`, 'info')
+									}
 									return { deferred: true }
 								}
 							}
@@ -1881,6 +1899,8 @@ export async function summarize() {
 							logCandidateDecision(e, alt, 'rejected', 'decode_fail', { phase: 'fallback_attempt' })
 							return { fetched: false }
 						}
+						log('Trying alternative source', alt.source, `(level ${alt.level})...`)
+						logCandidateDecision(e, alt, 'attempt', '', { phase: 'fallback_attempt' })
 						let origin = alt.origin || alt.provider || alt.from || ''
 						logEvent(e, {
 							phase: 'fallback_decode',
@@ -1952,16 +1972,14 @@ export async function summarize() {
 						let alt = alternatives[j]
 						let res = await tryAlternative(alt, { allowWait: false })
 						if (res?.deferred) {
-							pendingDecode.push(alt)
-							continue
+							deferredCandidate = alt
+							break
 						}
 						if (res?.fetched) break
 					}
-					if (!fetched && pendingDecode.length) {
-						for (let alt of pendingDecode) {
-							let res = await tryAlternative(alt, { allowWait: true })
-							if (res?.fetched) break
-						}
+					if (!fetched && deferredCandidate) {
+						let res = await tryAlternative(deferredCandidate, { allowWait: true })
+						if (res?.fetched) fetched = true
 					}
 					if (!fetched) {
 						let externalResults = []
@@ -2007,26 +2025,21 @@ export async function summarize() {
 								logCandidateDecision(e, alt, 'rejected', alt.reason || 'filtered', { phase: 'external_candidate', provider: externalSearch?.provider || '' })
 							}
 							if (externalAlternatives.length) {
-								let pendingExternal = []
+								let deferredExternal = null
 								for (let alt of externalAlternatives) {
 									let res = await tryAlternative(alt, { allowWait: false })
 									if (res?.deferred) {
-										pendingExternal.push(alt)
-										continue
+										deferredExternal = alt
+										break
 									}
 									if (res?.fetched) {
 										fetched = true
 										break
 									}
 								}
-								if (!fetched && pendingExternal.length) {
-									for (let alt of pendingExternal) {
-										let res = await tryAlternative(alt, { allowWait: true })
-										if (res?.fetched) {
-											fetched = true
-											break
-										}
-									}
+								if (!fetched && deferredExternal) {
+									let res = await tryAlternative(deferredExternal, { allowWait: true })
+									if (res?.fetched) fetched = true
 								}
 							}
 						}
