@@ -36,7 +36,7 @@ const summarySchema = {
 	strict: true,
 }
 
-export async function ai({ url, text, titleEn, titleRu, source, id }) {
+export async function ai({ url, text, titleEn, titleRu, source, id, meta }) {
 	await init
 	for (let i = 0; i < 3; i++) {
 		try {
@@ -45,10 +45,28 @@ export async function ai({ url, text, titleEn, titleRu, source, id }) {
 				'Return ONLY JSON with keys: topic, priority, titleRu, summary.',
 				'Use topic values that exist in the provided taxonomy when possible.',
 			].join('\n')
+			let metaLines = []
+			let truncate = (value, max = 300) => {
+				if (!value) return ''
+				let textValue = String(value)
+				return textValue.length > max ? textValue.slice(0, max - 3) + '...' : textValue
+			}
+			if (meta?.title) metaLines.push(`Meta title: ${truncate(meta.title)}`)
+			if (meta?.description) metaLines.push(`Meta description: ${truncate(meta.description, 400)}`)
+			if (meta?.keywords) metaLines.push(`Meta keywords: ${truncate(meta.keywords)}`)
+			if (meta?.date || meta?.publishedTime) {
+				metaLines.push(`Meta date: ${truncate(meta.publishedTime || meta.date)}`)
+			}
+			if (meta?.author) metaLines.push(`Meta author: ${truncate(meta.author)}`)
+			if (meta?.siteName) metaLines.push(`Meta site: ${truncate(meta.siteName)}`)
+			if (meta?.section) metaLines.push(`Meta section: ${truncate(meta.section)}`)
+			if (meta?.tags) metaLines.push(`Meta tags: ${truncate(meta.tags, 400)}`)
 			let userContent = [
 				`Title: ${titleEn || titleRu || ''}`,
 				`Source: ${source || ''}`,
 				`URL: ${url || ''}`,
+				metaLines.length ? 'Meta:' : '',
+				...metaLines,
 				'Text:',
 				text || '',
 			].join('\n')
@@ -71,8 +89,9 @@ export async function ai({ url, text, titleEn, titleRu, source, id }) {
 					prompt: userLogged,
 				}, 'ai prompt', 'info')
 			}
+			let model = 'gpt-4o'
 			let completion = await openai.chat.completions.create({
-				model: 'gpt-4o',
+				model,
 				temperature: 0.2,
 				messages: [
 					{
@@ -88,6 +107,7 @@ export async function ai({ url, text, titleEn, titleRu, source, id }) {
 			})
 			let content = completion?.choices?.[0]?.message?.content || ''
 			let res = JSON.parse(content)
+			res.model = model
 			log('got', res.summary.length, 'chars,', completion.usage?.total_tokens, 'tokens used')
 			logFetch({
 				phase: 'ai_result',

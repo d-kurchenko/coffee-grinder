@@ -19,12 +19,28 @@ function sanitizeParams(params) {
 }
 
 export function log(...params) {
+	if (globalThis.__LOG_SUPPRESS_ALL === true) return
 	let safeParams = sanitizeParams(params)
+	let suppress = globalThis.__LOG_SUPPRESS === true
+	if (suppress) {
+		let text = safeParams.map(param => String(param)).join(' ')
+		let allowed = text.startsWith('[fatal]')
+			|| text.startsWith('[warn] sheet write failed')
+			|| text.startsWith('[info] sheet read/write')
+		if (!allowed) return
+	}
 	if (useStderr) {
 		console.error(...safeParams)
 		if (duplicate) console.log(...safeParams)
 		return
 	}
+	console.log(...safeParams)
+	if (duplicate) console.error(...safeParams)
+}
+
+export function logTable(...params) {
+	if (globalThis.__LOG_SUPPRESS_ALL === true) return
+	let safeParams = sanitizeParams(params)
 	console.log(...safeParams)
 	if (duplicate) console.error(...safeParams)
 }

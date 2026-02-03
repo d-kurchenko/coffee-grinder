@@ -34,8 +34,65 @@ async function fetchJson(url, timeoutMs) {
 	return await response.json()
 }
 
+const stopwords = new Set([
+	'the','a','an','and','or','but','if','then','than','that','this','these','those','to','of','for','in','on','at','by','with','from','as','is','are','was','were','be','been','being','it','its','into','over','after','before','between','about','amid','amidst','against','up','down','out','off','under','again','more','most','some','any','no','not','only','very','just','so','too','also','can','could','may','might','will','would','should','shall','do','does','did','doing','has','have','had','having','i','you','he','she','we','they','them','their','our','your','my',
+])
+
+function buildRequiredQuery(text) {
+	let cleaned = normalizeTitleForSearch(text)
+	if (!cleaned) return ''
+	let tokens = cleaned
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+		.split(/\s+/)
+		.filter(Boolean)
+		.filter(token => token.length > 2 && !stopwords.has(token))
+	let uniq = []
+	let seen = new Set()
+	for (let token of tokens) {
+		if (seen.has(token)) continue
+		seen.add(token)
+		uniq.push(token)
+		if (uniq.length >= 6) break
+	}
+	if (!uniq.length) return `"${cleaned}"`
+	return uniq.map(token => `"${token}"`).join(' ')
+}
+
+function buildSerpapiQuery(event, fallbackQuery) {
+	if (!event) return fallbackQuery || ''
+	let title = normalizeTitleForSearch(event._originalTitleEn || event._originalTitleRu || event.titleEn || event.titleRu)
+	if (title) return buildRequiredQuery(title)
+	let terms = extractSearchTermsFromUrl(event.url || event.gnUrl || '')
+	if (terms) return buildRequiredQuery(terms)
+	return fallbackQuery || ''
+}
+
+function titleRelevant(event, candidate) {
+	let target = normalizeTitleKey(event?._originalTitleEn || event?._originalTitleRu || event?.titleEn || event?.titleRu || '')
+	if (!target) {
+		let terms = extractSearchTermsFromUrl(event?.url || event?.gnUrl || '')
+		if (terms) target = normalizeTitleKey(terms)
+	}
+	if (!target) return false
+	let cand = normalizeTitleKey(candidate?.titleEn || extractSearchTermsFromUrl(candidate?.url || ''))
+	if (!cand) return false
+	if (cand === target) return true
+	if (cand.includes(target) || target.includes(cand)) return true
+	let targetTokens = new Set(target.split(/\s+/).filter(Boolean))
+	let candTokens = new Set(cand.split(/\s+/).filter(Boolean))
+	if (targetTokens.size <= 2) return false
+	let common = 0
+	for (let token of targetTokens) {
+		if (candTokens.has(token)) common++
+	}
+	let ratio = common / Math.max(targetTokens.size, candTokens.size)
+	return common >= 2 && ratio >= 0.3
+}
+
 async function searchGoogleNewsViaSerpapi(query) {
 	if (!externalSearch?.enabled || externalSearch.provider !== 'serpapi' || !externalSearch.apiKey) return []
+	if (!query) return []
 	let maxResults = externalSearch.maxResults || 6
 	let apiKey = encodeURIComponent(externalSearch.apiKey)
 	let url = `https://serpapi.com/search.json?engine=google_news&hl=en&gl=us&num=${maxResults}&q=${encodeURIComponent(query)}&api_key=${apiKey}`
@@ -49,7 +106,10 @@ async function searchGoogleNewsViaSerpapi(query) {
 				for (let story of item.stories) items.push(story)
 			}
 		}
-		let mapped = items.map(item => {
+		let mapped = items.map((item, index) => {
+			let rawRank = item?.position ?? item?.rank ?? item?.index
+			let parsedRank = Number(rawRank)
+			let rank = Number.isFinite(parsedRank) ? parsedRank : (index + 1)
 			let link = item?.link || item?.url || ''
 			let gnUrl = ''
 			let directUrl = link
@@ -69,15 +129,37 @@ async function searchGoogleNewsViaSerpapi(query) {
 				url: directUrl,
 				gnUrl,
 				source: source || '',
+				origin: 'serpapi',
+				rank,
 			}
-		}).filter(item => item.source && (item.url || item.gnUrl))
-		let gnOnly = mapped.filter(item => item.gnUrl)
-		if (gnOnly.length) return gnOnly
+		}).filter(item => item.source && item.url)
 		return mapped
 	} catch (error) {
 		log('Google News serpapi fallback failed', error?.message || error)
 		return []
 	}
+}
+
+function formatSerpapiSample(list, limit = 3) {
+	if (!Array.isArray(list) || !list.length) return ''
+	return list.slice(0, limit).map(item => {
+		let title = (item.titleEn || '').replace(/\s+/g, ' ').trim()
+		let url = item.url || item.gnUrl || ''
+		let source = item.source || ''
+		return `${source}: ${title} (${url})`
+	}).join(' | ')
+}
+
+function summarizeResultsForLog(results, limit = 8) {
+	if (!Array.isArray(results) || !results.length) return []
+	return results.slice(0, limit).map(item => ({
+		source: item.source || '',
+		title: (item.titleEn || item.titleRu || '').replace(/\s+/g, ' ').trim(),
+		url: item.url || '',
+		gnUrl: item.gnUrl || '',
+		origin: item.origin || item.provider || item.from || '',
+		rank: Number.isFinite(Number(item.rank)) ? Number(item.rank) : undefined,
+	}))
 }
 
 export function parseRelatedArticles(description) {
@@ -87,10 +169,12 @@ export function parseRelatedArticles(description) {
 		let list = JSON.parse(json)?.ol?.li
 		if (!list) return []
 		if (!Array.isArray(list)) list = [list]
-		return list.map(({ a, font }) => ({
+		return list.map(({ a, font }, index) => ({
 			titleEn: a?._text || '',
 			gnUrl: a?._attributes?.href || '',
 			source: font?._text || '',
+			origin: 'gn',
+			rank: index + 1,
 		})).filter(article => article.gnUrl && article.source)
 	} catch {
 		return []
@@ -103,14 +187,16 @@ export function parseGoogleNewsXml(xml) {
 		let items = feed?.rss?.channel?.item
 		if (!items) return []
 		if (!Array.isArray(items)) items = [items]
-		return items.map(event => {
+		return items.map((event, index) => {
 			let articles = parseRelatedArticles(event.description?._text)
 			return {
 				titleEn: event.title?._text || '',
 				gnUrl: event.link?._text || '',
 				source: event.source?._text || '',
+				origin: 'gn',
 				date: event.pubDate?._text ? new Date(event.pubDate._text) : null,
 				articles,
+				rank: index + 1,
 			}
 		}).filter(item => item.gnUrl)
 	} catch {
@@ -136,18 +222,28 @@ export function buildSearchQuery(event) {
 }
 
 export function buildFallbackSearchQueries(event) {
-	let title = normalizeTitleForSearch(event._originalTitleEn || event._originalTitleRu || event.titleEn || event.titleRu)
+	let title = normalizeTitleForSearch(event._originalTitleEn || event._originalTitleRu || event.titleEn || event.titleRu || event.title || '')
 	let queries = []
-	if (title) {
-		queries.push(`"${title}"`)
-		queries.push(title)
-		let short = title.split(/\s+/).slice(0, 10).join(' ')
-		if (short && short !== title) queries.push(short)
+	const extractTerms = url => {
+		if (!url) return ''
+		let terms = extractSearchTermsFromUrl(url)
+		if (terms) return terms
+		if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+			return extractSearchTermsFromUrl(`https://${url}`)
+		}
+		return ''
 	}
-	if (!queries.length && !isBlank(event.url)) {
-		let terms = extractSearchTermsFromUrl(event.url)
-		if (terms) queries.push(terms)
-		else queries.push(event.url)
+	if (title) {
+		let q = buildRequiredQuery(title)
+		if (q) queries.push(q)
+	}
+	if (!queries.length) {
+		let url = event._originalUrl || event.url || event.alternativeUrl || event.gnUrl || ''
+		let terms = extractTerms(url)
+		if (terms) {
+			let q = buildRequiredQuery(terms)
+			if (q) queries.push(q)
+		}
 	}
 	let seen = new Set()
 	let unique = []
@@ -175,12 +271,25 @@ export function scoreGnCandidate(event, candidate) {
 	return score
 }
 
-export async function searchGoogleNews(query, last) {
+export async function searchGoogleNews(query, last, event) {
 	if (!query) return []
 	let cooldownMs = getGnSearchCooldownMs()
 	if (cooldownMs > 0) {
 		log('Google News search cooldown active', Math.ceil(cooldownMs / 1000), 's')
-		let serpapiResults = await searchGoogleNewsViaSerpapi(query)
+		let serpapiQuery = buildSerpapiQuery(event, query)
+		log('SerpAPI query', serpapiQuery)
+		let serpapiResults = await searchGoogleNewsViaSerpapi(serpapiQuery)
+		if (event) {
+			let before = serpapiResults
+			let after = serpapiResults.filter(item => titleRelevant(event, item))
+			log('SerpAPI results', before.length, '| accepted', after.length, '| rejected', before.length - after.length)
+			log('SerpAPI accepted sample', formatSerpapiSample(after))
+			if (before.length && before.length - after.length) {
+				let rejected = before.filter(item => !after.includes(item))
+				log('SerpAPI rejected sample', formatSerpapiSample(rejected))
+			}
+			serpapiResults = after
+		}
 		if (serpapiResults.length) {
 			log('Google News search fallback (serpapi) returned', serpapiResults.length)
 			gnSearchCache.set(query, { time: Date.now(), results: serpapiResults })
@@ -191,6 +300,7 @@ export async function searchGoogleNews(query, last) {
 	if (cache && (Date.now() - cache.time) < 5 * 60e3) {
 		return cache.results
 	}
+	log('Google News query', query)
 	await sleep(last.gnSearch.time + last.gnSearch.delay - Date.now())
 	last.gnSearch.time = Date.now()
 	let url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&${googleNewsDefaults}`
@@ -207,7 +317,20 @@ export async function searchGoogleNews(query, last) {
 			if (response.status === 503 || response.status === 429) {
 				setGnSearchCooldown(10 * 60e3)
 			}
-			let serpapiResults = await searchGoogleNewsViaSerpapi(query)
+			let serpapiQuery = buildSerpapiQuery(event, query)
+			log('SerpAPI query', serpapiQuery)
+			let serpapiResults = await searchGoogleNewsViaSerpapi(serpapiQuery)
+			if (event) {
+				let before = serpapiResults
+				let after = serpapiResults.filter(item => titleRelevant(event, item))
+				log('SerpAPI results', before.length, '| accepted', after.length, '| rejected', before.length - after.length)
+				log('SerpAPI accepted sample', formatSerpapiSample(after))
+				if (before.length && before.length - after.length) {
+					let rejected = before.filter(item => !after.includes(item))
+					log('SerpAPI rejected sample', formatSerpapiSample(rejected))
+				}
+				serpapiResults = after
+			}
 			if (serpapiResults.length) {
 				log('Google News search fallback (serpapi) returned', serpapiResults.length)
 				gnSearchCache.set(query, { time: Date.now(), results: serpapiResults })
@@ -216,11 +339,26 @@ export async function searchGoogleNews(query, last) {
 		}
 		let xml = await response.text()
 		let results = parseGoogleNewsXml(xml)
+		log('Google News results', results.length)
+		if (results.length) log('Google News sample', formatSerpapiSample(results))
 		gnSearchCache.set(query, { time: Date.now(), results })
 		return results
 	} catch(e) {
 		log('Google News search failed', e)
-		let serpapiResults = await searchGoogleNewsViaSerpapi(query)
+		let serpapiQuery = buildSerpapiQuery(event, query)
+		log('SerpAPI query', serpapiQuery)
+		let serpapiResults = await searchGoogleNewsViaSerpapi(serpapiQuery)
+		if (event) {
+			let before = serpapiResults
+			let after = serpapiResults.filter(item => titleRelevant(event, item))
+			log('SerpAPI results', before.length, '| accepted', after.length, '| rejected', before.length - after.length)
+			log('SerpAPI accepted sample', formatSerpapiSample(after))
+			if (before.length && before.length - after.length) {
+				let rejected = before.filter(item => !after.includes(item))
+				log('SerpAPI rejected sample', formatSerpapiSample(rejected))
+			}
+			serpapiResults = after
+		}
 		if (serpapiResults.length) {
 			log('Google News search fallback (serpapi) returned', serpapiResults.length)
 			gnSearchCache.set(query, { time: Date.now(), results: serpapiResults })
@@ -252,16 +390,28 @@ export async function backfillGnUrl(event, last, { logEvent } = {}) {
 	if (!uniqueQueries.length) return false
 	let best = null
 	let bestScore = -1
+	let bestRank = Number.POSITIVE_INFINITY
 	let usedQuery = ''
 	for (let query of uniqueQueries) {
-		let results = await searchGoogleNews(query, last)
+		let results = await searchGoogleNews(query, last, event)
+		if (logEvent) {
+			logEvent(event, {
+				phase: 'gn_backfill_search',
+				status: results.length ? 'ok' : 'empty',
+				query,
+				count: results.length,
+				results: summarizeResultsForLog(results),
+			}, `#${event.id} GN backfill search ${results.length}`, results.length ? 'info' : 'warn')
+		}
 		if (!results.length) continue
 		usedQuery = query
 		for (let item of results.slice(0, 6)) {
 			let score = scoreGnCandidate(event, item)
-			if (score > bestScore) {
+			let rank = Number.isFinite(Number(item?.rank)) ? Number(item.rank) : Number.POSITIVE_INFINITY
+			if (score > bestScore || (score === bestScore && rank < bestRank)) {
 				best = item
 				bestScore = score
+				bestRank = rank
 			}
 		}
 		if (bestScore >= 3) break
@@ -333,7 +483,16 @@ export async function hydrateFromGoogleNews(event, last, { decodeUrl, logEvent }
 	if (hasMeta && hasArticles) return false
 
 	let query = buildSearchQuery(event)
-	let results = await searchGoogleNews(query, last)
+	let results = await searchGoogleNews(query, last, event)
+	if (logEvent) {
+		logEvent(event, {
+			phase: 'gn_search',
+			status: results.length ? 'ok' : 'empty',
+			query,
+			count: results.length,
+			results: summarizeResultsForLog(results),
+		}, `#${event.id} GN search ${results.length}`, results.length ? 'info' : 'warn')
+	}
 	if (!results.length) return false
 
 	let best = results[0]

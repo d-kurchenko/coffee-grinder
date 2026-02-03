@@ -26,7 +26,7 @@ export async function searchAgencyArticles(event, last) {
 		for (let domain of target.domains) {
 			for (let query of limitedQueries) {
 				let searchQuery = `site:${domain} ${query}`
-				let items = await searchGoogleNews(searchQuery, last)
+				let items = await searchGoogleNews(searchQuery, last, event)
 				if (!items.length) continue
 				results.push(...items.map(item => ({
 					...item,

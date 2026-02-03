@@ -5,13 +5,31 @@ import {
 	verifyModel,
 	verifyTemperature,
 	verifyUseSearch,
+	verifyReasoningEffort,
 	verifyFallbackMaxChars,
 	verifyFallbackContextMaxChars,
 } from '../config/verification.js'
 import { log } from './log.js'
 
-const XAI_API_URL = process.env.XAI_API_URL || 'https://api.x.ai/v1/responses'
-const XAI_API_KEY = process.env.XAI_API_KEY || ''
+const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/responses'
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''
+
+const verifySchema = {
+	type: 'json_schema',
+	name: 'verify_result',
+	strict: true,
+	schema: {
+		type: 'object',
+		additionalProperties: false,
+		properties: {
+			match: { type: 'boolean' },
+			confidence: { type: 'number' },
+			reason: { type: 'string' },
+			page_summary: { type: 'string' },
+		},
+		required: ['match', 'confidence', 'reason', 'page_summary'],
+	},
+}
 
 function cleanJsonText(text) {
 	if (!text) return ''
@@ -105,31 +123,37 @@ function extractResponseText(response) {
 	return typeof fallback === 'string' ? fallback : ''
 }
 
-async function callXai({ system, prompt, temperature, useSearch }) {
-	if (!XAI_API_KEY) throw new Error('XAI_API_KEY is not set')
+async function callOpenAI({ system, prompt, temperature, useSearch }) {
+	if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not set')
+	let supportsTemperature = !/^gpt-5/i.test(verifyModel || '')
+	if (/^gpt-5\.1/i.test(verifyModel || '') && verifyReasoningEffort === 'none') {
+		supportsTemperature = true
+	}
 	let body = {
 		model: verifyModel,
-		temperature,
 		input: [
-			{ role: 'system', content: system },
-			{ role: 'user', content: prompt },
+			{ role: 'system', content: [{ type: 'input_text', text: system }] },
+			{ role: 'user', content: [{ type: 'input_text', text: prompt }] },
 		],
+		text: { format: verifySchema },
 	}
-	if (useSearch) {
-		body.tools = [{ type: 'web_search' }]
+	if (verifyReasoningEffort) {
+		body.reasoning = { effort: verifyReasoningEffort }
 	}
-	let response = await fetch(XAI_API_URL, {
+	if (supportsTemperature && Number.isFinite(temperature)) body.temperature = temperature
+	if (useSearch) body.tools = [{ type: 'web_search' }]
+	let response = await fetch(OPENAI_API_URL, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
-			'Authorization': `Bearer ${XAI_API_KEY}`,
+			'Authorization': `Bearer ${OPENAI_API_KEY}`,
 		},
 		body: JSON.stringify(body),
 	})
 	let data = await response.json().catch(() => ({}))
 	if (!response.ok) {
 		let message = data?.error?.message || data?.message || response.statusText
-		throw new Error(`xAI API error: ${message}`)
+		throw new Error(`OpenAI API error: ${message}`)
 	}
 	return data
 }
@@ -158,7 +182,7 @@ export async function verifyArticle({
 		let completion
 		let fallbackUsed = false
 		try {
-			completion = await callXai({
+			completion = await callOpenAI({
 				system,
 				prompt: user,
 				temperature: verifyTemperature,
@@ -176,7 +200,7 @@ export async function verifyArticle({
 				debugSystem = clampText(fallbackPrompt.system, debugMaxChars)
 				debugUser = clampText(fallbackPrompt.user, debugMaxChars)
 			}
-			completion = await callXai({
+			completion = await callOpenAI({
 				system: fallbackPrompt.system,
 				prompt: fallbackPrompt.user,
 				temperature: verifyTemperature,
@@ -199,6 +223,8 @@ export async function verifyArticle({
 			pageSummary,
 			verified: true,
 			status: ok ? 'ok' : 'mismatch',
+			model: verifyModel,
+			useSearch: verifyUseSearch,
 			tokens: completion?.usage?.total_tokens ?? completion?.usage?.totalTokens,
 			debug: debug
 				? {
@@ -225,6 +251,8 @@ export async function verifyArticle({
 				pageSummary: '',
 				verified: false,
 				status: 'unverified',
+				model: verifyModel,
+				useSearch: verifyUseSearch,
 				error,
 			}
 		}
@@ -236,6 +264,8 @@ export async function verifyArticle({
 			pageSummary: '',
 			verified: false,
 			status: 'error',
+			model: verifyModel,
+			useSearch: verifyUseSearch,
 			error,
 		}
 	}
