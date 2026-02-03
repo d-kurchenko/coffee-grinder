@@ -4,6 +4,7 @@ import { createWriteStream } from 'fs'
 import { log } from './log.js'
 
 const client = new ElevenLabsClient()
+const VOICE_ID = process.env.ELEVEN_VOICE_ID || 'caCdUepOP0tqRkMSyQWB'
 
 export async function speak(filePath, text) {
 	return new Promise(async (resolve, reject) => {
@@ -13,7 +14,7 @@ export async function speak(filePath, text) {
 			reject(e)
 		}
 		try {
-			let audio = await client.textToSpeech.convert('EXAVITQu4vr4xnSDxMaL', {
+			let audio = await client.textToSpeech.convert(VOICE_ID, {
 				text,
 				model_id: "eleven_multilingual_v2",
 			})
