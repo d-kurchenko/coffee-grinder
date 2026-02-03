@@ -1,10 +1,6 @@
 @echo off
 setlocal
 
-:: enable ANSI in classic cmd
-set "VTL="
-for /f "tokens=3" %%A in ('reg query HKCU\Console /v VirtualTerminalLevel 2^>nul ^| find "VirtualTerminalLevel"') do set "VTL=%%A"
-if /i not "%VTL%"=="0x1" reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
 
 :: relaunch in Windows Terminal if available
 if not defined WT_SESSION if not defined WT_RELAUNCHED (

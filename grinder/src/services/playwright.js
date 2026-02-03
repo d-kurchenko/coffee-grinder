@@ -250,6 +250,73 @@ export async function detectCaptcha(page) {
 	return false
 }
 
+const pageStatePatterns = {
+	js_required: [
+		'enable javascript',
+		'javascript is required',
+		'requires javascript',
+		'please enable javascript',
+		'please enable cookies',
+	],
+	blocked: [
+		'access denied',
+		'request blocked',
+		'forbidden',
+		'service unavailable',
+		'unusual traffic',
+		'automated requests',
+		'temporarily blocked',
+	],
+	paywall: [
+		'subscribe to continue',
+		'subscribe to read',
+		'subscription required',
+		'subscriber-only',
+		'sign in to continue',
+		'log in to continue',
+		'please subscribe',
+		'paywall',
+		'metered',
+	],
+	consent: [
+		'cookie consent',
+		'cookie preferences',
+		'privacy settings',
+		'gdpr',
+		'accept cookies',
+		'accept all cookies',
+		'manage cookies',
+		'cookie policy',
+	],
+}
+
+export function classifyHtmlState(html = '', title = '') {
+	let sample = `${title || ''}\n${html || ''}`.toLowerCase()
+	if (!sample.trim()) return { state: 'empty', reason: 'empty' }
+	for (let [state, patterns] of Object.entries(pageStatePatterns)) {
+		for (let pattern of patterns) {
+			if (sample.includes(pattern)) {
+				return { state, reason: pattern }
+			}
+		}
+	}
+	return { state: 'unknown', reason: '' }
+}
+
+export async function detectPageState(page) {
+	let targetPage = page || await getPage()
+	if (await detectCaptcha(targetPage)) return { state: 'captcha', reason: 'captcha' }
+	let html = ''
+	let title = ''
+	try {
+		html = await targetPage.content()
+	} catch {}
+	try {
+		title = await targetPage.title()
+	} catch {}
+	return classifyHtmlState(html, title)
+}
+
 export async function close() {
 	if (!contextPromise) return
 	let { context } = await contextPromise
