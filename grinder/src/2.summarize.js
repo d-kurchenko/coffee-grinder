@@ -83,12 +83,77 @@ jsdomVirtualConsole.on('jsdomError', () => {})
 jsdomVirtualConsole.on('error', () => {})
 jsdomVirtualConsole.on('warn', () => {})
 
+function setupLogTee() {
+	const logFile = process.env.LOG_TEE_FILE || process.env.SUMMARIZE_LOG_FILE || ''
+	if (!logFile) return null
+	let stream = null
+	try {
+		fs.mkdirSync(path.dirname(logFile), { recursive: true })
+		let flags = process.env.LOG_TEE_APPEND === '1' ? 'a' : 'w'
+		stream = fs.createWriteStream(logFile, { flags })
+	} catch (error) {
+		console.error('[warn] log tee init failed:', error?.message || error)
+		return null
+	}
+	const stripAnsi = process.env.LOG_TEE_STRIP_ANSI !== '0'
+	const ansiRegex = /\u001b\[[0-9;?]*[ -/]*[@-~]/g
+	const ansiTest = /\u001b\[[0-9;?]*[ -/]*[@-~]/
+	const writeToFile = (chunk, encoding) => {
+		try {
+			if (!stream || stream.destroyed) return
+			if (stripAnsi) {
+				let text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+				let hadAnsi = ansiTest.test(text)
+				text = text.replace(ansiRegex, '').replace(/\r/g, '\n')
+				if (hadAnsi && text && !text.endsWith('\n')) text += '\n'
+				stream.write(text, 'utf8')
+				return
+			}
+			if (typeof encoding === 'string') {
+				stream.write(chunk, encoding)
+			} else {
+				stream.write(chunk)
+			}
+		} catch {}
+	}
+	const wrap = target => {
+		const original = target.write.bind(target)
+		target.write = (chunk, encoding, cb) => {
+			writeToFile(chunk, encoding)
+			return original(chunk, encoding, cb)
+		}
+		return () => {
+			target.write = original
+		}
+	}
+	const restoreStdout = wrap(process.stdout)
+	const restoreStderr = wrap(process.stderr)
+	const cleanup = () => {
+		restoreStdout()
+		restoreStderr()
+		try {
+			stream.end()
+		} catch {}
+	}
+	process.on('exit', cleanup)
+	process.on('SIGINT', () => {
+		cleanup()
+		process.exit(130)
+	})
+	process.on('SIGTERM', () => {
+		cleanup()
+		process.exit(143)
+	})
+	return { cleanup }
+}
+
 const isSummarizeCli = Array.isArray(process.argv)
 	? process.argv.some(arg => String(arg).includes('2.summarize'))
 	: false
 if (isSummarizeCli) {
 	globalThis.__LOG_SUPPRESS_ALL = true
 }
+setupLogTee()
 
 let cacheUrlAliases = null
 
