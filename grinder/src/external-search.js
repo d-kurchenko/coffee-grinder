@@ -62,6 +62,7 @@ function normalizeResult(item) {
 		url,
 		gnUrl,
 		source: source || '',
+		origin: item.origin || '',
 	}
 }
 
@@ -93,6 +94,7 @@ async function searchSerper(query, { apiKey, maxResults, timeoutMs }) {
 		title: item.title,
 		url: item.link,
 		source: item.source,
+		origin: 'serper',
 	})).filter(Boolean)
 }
 
@@ -110,6 +112,7 @@ async function searchBrave(query, { apiKey, maxResults, timeoutMs }) {
 		title: item.title,
 		url: item.url,
 		source: item.source,
+		origin: 'brave',
 	})).filter(Boolean)
 }
 
@@ -121,6 +124,7 @@ async function searchSerpapi(query, { apiKey, maxResults, timeoutMs }) {
 		title: item.title,
 		url: item.link,
 		source: item.source,
+		origin: 'serpapi',
 	})).filter(Boolean)
 }
 

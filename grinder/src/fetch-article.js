@@ -181,7 +181,7 @@ async function tryArchives(url) {
 	}
 }
 
-export async function fetchArticle(url) {
+export async function fetchArticle(url, { onMethod } = {}) {
 	let cooldown = isDomainInCooldown(url)
 	if (cooldown) {
 		log('domain cooldown active', cooldown.host, Math.ceil(cooldown.remainingMs / 1000), 's')
@@ -199,9 +199,11 @@ export async function fetchArticle(url) {
 					log('article fetch blocked by captcha', getHost(url))
 					setLastStatus(url, 'captcha')
 					setDomainCooldown(url, captchaCooldownMs, 'captcha')
+					if (onMethod) onMethod('captcha')
 					return
 				}
 				setLastStatus(url, 200)
+				if (onMethod) onMethod('fetch')
 				return text
 			}
 			setLastStatus(url, response.status)
@@ -218,7 +220,11 @@ export async function fetchArticle(url) {
 
 			if ([401, 403, 429].includes(response.status)) {
 				let altText = await tryFetch(buildJinaUrl(url), 'jina')
-				if (altText) return altText
+				if (altText) {
+					setLastStatus(url, 'jina')
+					if (onMethod) onMethod('jina')
+					return altText
+				}
 				altText = await tryArchives(url)
 				if (altText) return altText
 				altText = await tryWayback(url)
@@ -233,6 +239,7 @@ export async function fetchArticle(url) {
 				log('article fetch failed', 'timeout')
 				setLastStatus(url, 'timeout')
 				setDomainCooldown(url, 2 * 60e3, 'timeout')
+				if (onMethod) onMethod('timeout')
 			} else {
 				log('article fetch failed', message)
 				setLastStatus(url, 'error')

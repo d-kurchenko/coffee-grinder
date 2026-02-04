@@ -13,7 +13,15 @@ export let news = []
 // } catch(e) {}
 // news = proxy(news)
 // subscribe(news, () => fs.writeFileSync('news.json', JSON.stringify(news, null, 2)))
-news = proxy(await loadTable(spreadsheetId, newsSheet))
+let loaded = await loadTable(spreadsheetId, newsSheet)
+for (let row of loaded) {
+	if (row && typeof row === 'object') {
+		delete row.articles
+		delete row._articles
+		delete row._articlesOrigin
+	}
+}
+news = proxy(loaded)
 subscribe(news, () => queueSave('auto'))
 
 const saveDebounceMs = Math.max(200, Number.parseInt(process.env.SHEETS_SAVE_DEBOUNCE_MS || '', 10) || 2000)
@@ -112,8 +120,10 @@ export async function save() {
 export async function saveRowByIndex(rowNumber, row) {
 	try {
 		await saveRow(spreadsheetId, newsSheet, news.headers || [], rowNumber, row)
+		return true
 	} catch (e) {
 		let detail = formatSaveErrorInline(e)
 		log(`[warn] sheet write failed (sheet=${spreadsheetId} tab=${newsSheet} row=${rowNumber}${detail ? ` ${detail}` : ''})`)
+		return false
 	}
 }
